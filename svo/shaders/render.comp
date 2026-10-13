@@ -1,0 +1,99 @@
+// Pass 1: one primary ray per pixel, shading, and a small G-buffer for outlines.
+// Mirrors shade() in src/core/render.cpp.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(rgba8, binding = 0) uniform writeonly image2D uColorOut;
+layout(rg32f, binding = 1) uniform writeonly image2D uGBufferOut;  // x = depth (-1 background), y = instance + 1
+layout(binding = 0) uniform sampler2D uToon;
+
+uniform vec3 uCamPos, uCamForward, uCamRight, uCamUp;
+uniform float uTanHalfFovY, uAspect;
+uniform ivec2 uSize;
+
+uniform int uView;    // 0 x-toon, 1 albedo, 2 normal, 3 level, 4 cost, 5 detail
+uniform int uDetail;  // xtoon::DetailMode
+uniform float uZMin, uR, uFocus, uFocusWidth, uBacklightR, uHighlightS, uAlbedoMix;
+uniform vec3 uLightDir;
+uniform bool uSmoothNormals, uShadows;
+
+vec3 heat(float x)
+{
+    x = clamp(x, 0.0, 1.0);
+    vec3 c0 = vec3(0.1, 0.15, 0.5), c1 = vec3(0.1, 0.7, 0.4), c2 = vec3(0.95, 0.85, 0.2), c3 = vec3(0.85, 0.15, 0.1);
+    if (x < 1.0 / 3.0)
+        return mix(c0, c1, x * 3.0);
+    if (x < 2.0 / 3.0)
+        return mix(c1, c2, x * 3.0 - 1.0);
+    return mix(c2, c3, x * 3.0 - 2.0);
+}
+
+vec3 sky(vec3 dir)
+{
+    return mix(vec3(0.93, 0.91, 0.86), vec3(0.55, 0.68, 0.86), clamp(dir.y * 1.5, 0.0, 1.0));
+}
+
+void main()
+{
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(px, uSize)))
+        return;
+
+    vec2 ndc = (vec2(px) + 0.5) / vec2(uSize) * 2.0 - 1.0;
+    vec3 dir = normalize(uCamForward + uCamRight * (ndc.x * uAspect * uTanHalfFovY) + uCamUp * (ndc.y * uTanHalfFovY));
+    float pixelSpread = 2.0 * uTanHalfFovY / float(uSize.y);
+
+    SceneHit hit = traceScene(uCamPos, dir, 1e30, pixelSpread, false);
+    vec2 gbuf = hit.hit ? vec2(hit.t, float(hit.instance + 1u)) : vec2(-1.0, 0.0);
+    imageStore(uGBufferOut, px, vec4(gbuf, 0.0, 0.0));
+
+    if (uView == 4) {
+        imageStore(uColorOut, px, vec4(heat(float(hit.steps) / 256.0), 1.0));
+        return;
+    }
+    if (!hit.hit) {
+        imageStore(uColorOut, px, vec4(sky(dir), 1.0));
+        return;
+    }
+
+    Instance inst = instances[hit.instance];
+    uvec4 node = nodes[hit.local.node];
+    vec4 albedo = unpackColor(node.z) * unpackColor(inst.tint);
+
+    vec3 nLocal;
+    if (uSmoothNormals) {
+        nLocal = unpackNormal(node.w);
+    } else {
+        vec3 dLocal = mat3(inst.worldToVoxel) * dir;
+        nLocal = vec3(0.0);
+        nLocal[hit.local.axis] = dLocal[hit.local.axis] > 0.0 ? -1.0 : 1.0;
+    }
+    vec3 n = normalize(mat3(inst.voxelToWorld) * nLocal);
+    vec3 p = uCamPos + dir * hit.t;
+    vec3 v = -dir;
+    vec3 l = uLightDir;
+
+    float lit = max(dot(n, l), 0.0);
+    if (uShadows && lit > 0.0) {
+        if (traceScene(p + n * (inst.voxelSize * 2.0), l, 1e30, pixelSpread, true).hit)
+            lit = 0.0;
+    }
+
+    float detail = 1.0;
+    if (uDetail == 1) detail = detailDepth(hit.t, uZMin, uR);
+    else if (uDetail == 2) detail = detailFocus(hit.t, uFocus, uFocusWidth, uR);
+    else if (uDetail == 3) detail = detailBacklight(dot(n, v), uBacklightR);
+    else if (uDetail == 4) detail = detailHighlight(dot(v, reflect(-l, n)), uHighlightS);
+    else if (uDetail == 5) detail = detailLevel(hit.local.level, int(inst.depth));
+
+    vec3 color;
+    if (uView == 1) color = albedo.rgb * (0.4 + 0.6 * lit);
+    else if (uView == 2) color = n * 0.5 + 0.5;
+    else if (uView == 3) color = heat(float(hit.local.level) / float(max(1u, inst.depth)));
+    else if (uView == 5) color = vec3(detail);
+    else {
+        vec4 t = texture(uToon, vec2(lit, detail));
+        color = mix(t.rgb, t.rgb * albedo.rgb, t.a * uAlbedoMix);
+    }
+    imageStore(uColorOut, px, vec4(color, 1.0));
+}
