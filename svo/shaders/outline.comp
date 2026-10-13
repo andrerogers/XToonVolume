@@ -1,0 +1,35 @@
+// Pass 2: dark outlines where the instance changes or the depth jumps.
+// Mirrors the outline loop at the end of renderCpu() in src/core/render.cpp.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(rgba8, binding = 0) uniform readonly image2D uColorIn;
+layout(rg32f, binding = 1) uniform readonly image2D uGBufferIn;
+layout(rgba8, binding = 2) uniform writeonly image2D uFinalOut;
+
+uniform ivec2 uSize;
+uniform bool uOutlines;
+uniform float uOutlineDepth;
+
+void main()
+{
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(px, uSize)))
+        return;
+    vec4 color = imageLoad(uColorIn, px);
+    vec2 c = imageLoad(uGBufferIn, px).xy;
+    if (uOutlines && c.y != 0.0) {
+        ivec2 offs[4] = ivec2[](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
+        for (int k = 0; k < 4; ++k) {
+            ivec2 q = px + offs[k];
+            if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, uSize)))
+                continue;
+            vec2 o = imageLoad(uGBufferIn, q).xy;
+            if (o.y != c.y || abs(o.x - c.x) > uOutlineDepth * c.x) {
+                color.rgb *= 0.12;
+                break;
+            }
+        }
+    }
+    imageStore(uFinalOut, px, color);
+}
