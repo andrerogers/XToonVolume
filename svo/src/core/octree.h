@@ -48,7 +48,7 @@ struct Octree {
 // Depth is the smallest power of two that covers the largest grid dimension.
 Octree build(const VoxelGrid& grid);
 
-// Packing helpers shared with the shaders (see shaders/common.glsl).
+// Packing helpers shared with the shaders (see shaders/svo.glsl).
 uint32_t packColor(glm::vec4 c);
 glm::vec4 unpackColor(uint32_t c);
 uint32_t packNormal(glm::vec3 n);    // octahedral, snorm16x2
